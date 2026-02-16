@@ -4,6 +4,7 @@ const c = @cImport(@cInclude("sqlite3.h"));
 const zqlite = @import("zqlite.zig");
 const Blob = zqlite.Blob;
 const Error = zqlite.Error;
+const Io = std.Io;
 
 pub const Conn = struct {
     conn: *c.sqlite3,
@@ -24,8 +25,8 @@ pub const Conn = struct {
         return .{ .conn = conn.? };
     }
 
-    pub fn release(self: Conn) void {
-        self._pool.?.release(self);
+    pub fn release(self: Conn, io: Io) Io.Cancelable!void {
+        try self._pool.?.release(io, self);
     }
 
     pub fn close(self: Conn) void {

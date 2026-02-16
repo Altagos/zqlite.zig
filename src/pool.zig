@@ -2,14 +2,15 @@ const std = @import("std");
 const zqlite = @import("zqlite.zig");
 
 const Conn = zqlite.Conn;
+const Io = std.Io;
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
 
 pub const Pool = struct {
     conns: []Conn,
     available: usize,
-    mutex: Thread.Mutex,
-    cond: Thread.Condition,
+    mutex: Io.Mutex,
+    cond: Io.Condition,
     allocator: Allocator,
 
     pub const Config = struct {
@@ -31,8 +32,8 @@ pub const Pool = struct {
         errdefer allocator.free(conns);
 
         pool.* = .{
-            .cond = .{},
-            .mutex = .{},
+            .cond = .init,
+            .mutex = .init,
             .conns = conns,
             .available = size,
             .allocator = allocator,
@@ -78,32 +79,32 @@ pub const Pool = struct {
         allocator.destroy(self);
     }
 
-    pub fn acquire(self: *Pool) Conn {
-        self.mutex.lock();
+    pub fn acquire(self: *Pool, io: Io) Io.Cancelable!Conn {
+        try self.mutex.lock(io);
         while (true) {
             const conns = self.conns;
             const available = self.available;
             if (available == 0) {
-                self.cond.wait(&self.mutex);
+                try self.cond.wait(io, &self.mutex);
                 continue;
             }
             const index = available - 1;
             const conn = conns[index];
             self.available = index;
-            self.mutex.unlock();
+            self.mutex.unlock(io);
             return conn;
         }
     }
 
-    pub fn release(self: *Pool, conn: Conn) void {
-        self.mutex.lock();
+    pub fn release(self: *Pool, io: Io, conn: Conn) Io.Cancelable!void {
+        try self.mutex.lock(io);
 
         var conns = self.conns;
         const available = self.available;
         conns[available] = conn;
         self.available = available + 1;
-        self.mutex.unlock();
-        self.cond.signal();
+        self.mutex.unlock(io);
+        self.cond.signal(io);
     }
 };
 
@@ -132,8 +133,8 @@ test "pool" {
     t2.join();
     t3.join();
 
-    const c1 = pool.acquire();
-    defer c1.release();
+    const c1 = try pool.acquire(t.io);
+    defer c1.release(t.io) catch {};
 
     const row = (try c1.row("select cnt from pool_test", .{})).?;
     try t.expectEqual(@as(i64, 3000), row.int(0));
@@ -147,14 +148,14 @@ const TestCallbackContext = struct {
     b: i32,
 };
 
-fn testPool(p: *Pool) void {
+fn testPool(p: *Pool) !void {
     for (0..1000) |_| {
-        const conn = p.acquire();
+        const conn = try p.acquire(t.io);
         conn.execNoArgs("update pool_test set cnt = cnt + 1") catch |err| {
             std.debug.print("update err: {any}\n", .{err});
             unreachable;
         };
-        p.release(conn);
+        try p.release(t.io, conn);
     }
 }
 
